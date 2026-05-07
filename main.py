@@ -26,6 +26,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 phone_regex = re.compile(r"\b05\d{8}\b")
 leads = []
+conversations = {}
 
 def classify_lead(msg):
     msg = msg.lower()
@@ -35,32 +36,38 @@ def classify_lead(msg):
         return "🟡 WARM"
     return "❄️ COLD"
 
-SYSTEM_PROMPT = """
-أنت Hammam AI، سكرتير شخصي ذكي واحترافي لصالح همام، مطور مواقع وأنظمة AI.
+SYSTEM_PROMPT = """أنت Hammam AI. سكرتير ذكي لهمام — مطور مواقع وأنظمة AI في الإمارات.
 
-خدماتك:
-- تصميم مواقع AI احترافية: من 500 إلى 1500 درهم
-- بوت واتساب AI: من 300 إلى 1000 درهم
-- مساعد شخصي AI مخصص: حسب المتطلبات
-- أنظمة عقارية ذكية وأتمتة: حسب المشروع
-- ربط ChatGPT مع واتساب والمواقع والأنظمة
+# شخصيتك:
+- تحكي بشكل طبيعي وبشري، مثل صديق محترف
+- ردودك قصيرة — جملة أو جملتين بالكثير
+- ما تكتب قوائم ونقاط إلا لو سألوا
+- ما تبدأ بـ "مرحباً" في كل رسالة
+- تستخدم إيموجي بشكل طبيعي أحياناً
+- لو قال شيء مضحك رد بخفة، بعدها أعد للموضوع
+- ما تكرر نفس السؤال لو أجابوا عليه
 
-شخصيتك:
-- احترافي، ودود، ذكي، مختصر وواضح
-- لست روبوت تقليدي، أنت سكرتير رقمي حقيقي
-- رد باللغة التي يكتب بها العميل (عربي أو إنجليزي)
+# خدماتك:
+- موقع AI احترافي: 500-1500 درهم
+- بوت واتساب AI: 300-1000 درهم
+- مساعد AI مخصص: حسب الطلب
+- أنظمة عقارية ذكية: حسب المشروع
+- ربط ChatGPT مع أي نظام
 
-تعليماتك:
-- اجمع معلومات العميل: الاسم، الخدمة المطلوبة، الميزانية
-- إذا سأل عن الأسعار أعطه سعر واضح ومباشر
-- حوّل كل محادثة لفرصة عمل
-- في نهاية كل محادثة اطلب رقمه أو بياناته للتواصل
-- إذا أعطاك رقمه قل له إن همام سيتواصل معه قريباً
-"""
+# هدفك:
+1. افهم وش يحتاج العميل
+2. اعطه سعر مباشر لو سأل
+3. اجمع اسمه وميزانيته
+4. في النهاية قله يتواصل مع همام مباشرة
+
+# مهم جداً:
+- رد بنفس لغة العميل (عربي أو إنجليزي)
+- ما تكتب أكثر من 3 أسطر أبداً
+- تصرف كأنك بشري ذكي مش روبوت"""
 
 @app.get("/")
 def home():
-    return {"message": "Hammam AI يشتغل 🔥"}
+    return {"message": "Hammam AI 🔥"}
 
 @app.get("/webhook")
 async def verify(request: Request):
@@ -78,7 +85,6 @@ async def webhook(request: Request):
         from_number = message["from"]
         text = message["text"]["body"]
 
-        # كشف رقم هاتف وحفظه كـ Lead
         match = phone_regex.search(text)
         if match:
             phone = match.group()
@@ -90,19 +96,34 @@ async def webhook(request: Request):
                 "note": text,
                 "type": lead_type
             })
-            print(f"🔥 Lead جديد: {phone} | {lead_type}")
+            print(f"🔥 Lead: {phone} | {lead_type}")
 
-        # رد GPT
+        if from_number not in conversations:
+            conversations[from_number] = []
+
+        conversations[from_number].append({
+            "role": "user",
+            "content": text
+        })
+
+        history = conversations[from_number][-10:]
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text}
-            ]
+                *history
+            ],
+            max_tokens=150,
+            temperature=0.8
         )
         reply = response.choices[0].message.content
 
-        # إرسال الرد على واتساب
+        conversations[from_number].append({
+            "role": "assistant",
+            "content": reply
+        })
+
         async with httpx.AsyncClient() as c:
             await c.post(
                 f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages",
