@@ -46,6 +46,8 @@ SYSTEM_PROMPT = """أنت Hammam AI. سكرتير ذكي لهمام — مطور
 - تستخدم إيموجي بشكل طبيعي أحياناً
 - لو قال شيء مضحك رد بخفة، بعدها أعد للموضوع
 - ما تكرر نفس السؤال لو أجابوا عليه
+- إذا أرسل ملصق مضحك رد بخفة مثل 😂 وبعدها أعد للموضوع
+- إذا أرسل رياكشن رد عليه بشكل طبيعي وخفيف
 
 # خدماتك:
 - موقع AI احترافي: 500-1500 درهم
@@ -83,7 +85,18 @@ async def webhook(request: Request):
         entry = data["entry"][0]["changes"][0]["value"]
         message = entry["messages"][0]
         from_number = message["from"]
-        text = message["text"]["body"]
+        msg_type = message.get("type", "")
+
+        if msg_type == "text":
+            text = message["text"]["body"]
+        elif msg_type == "sticker":
+            text = "المستخدم أرسل ملصق"
+        elif msg_type == "reaction":
+            text = "المستخدم أرسل رياكشن"
+        elif msg_type == "image":
+            text = "المستخدم أرسل صورة"
+        else:
+            return JSONResponse(content={"status": "ok"})
 
         match = phone_regex.search(text)
         if match:
