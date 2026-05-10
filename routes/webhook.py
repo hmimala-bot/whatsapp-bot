@@ -22,6 +22,93 @@ from services.sheets_service import append_to_sheets
 
 router = APIRouter(tags=["webhook"])
 
+REAL_ESTATE_LINK = "https://ajman-ai-closers.lovable.app/ai-chat"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Real Estate State Machine — Logic in Code
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Keywords that trigger real estate flow
+REAL_ESTATE_KEYWORDS_AR = [
+    "شقة", "شقه", "فيلا", "فيللا", "إيجار", "ايجار", "استئجار",
+    "عقار", "غرفة", "غرفه", "سكن", "أرض", "ارض", "محل", "مكتب",
+    "تاون هاوس", "استوديو", "دوبلكس", "بنتهاوس", "مشروع سكني",
+    "شراء شقة", "بيع شقة", "شقق", "عقارات", "سكنية", "villa",
+]
+REAL_ESTATE_KEYWORDS_EN = [
+    "apartment", "flat", "studio", "villa", "rent", "buy", "property",
+    "real estate", "room", "bedroom", "townhouse", "duplex", "penthouse",
+    "1bhk", "2bhk", "3bhk", "for rent", "for sale",
+]
+
+RENT_SIGNALS_AR = ["إيجار", "ايجار", "استئجار", "للإيجار", "للايجار", "أستأجر", "استاجر"]
+RENT_SIGNALS_EN = ["rent", "for rent", "renting", "lease"]
+BUY_SIGNALS_AR = ["شراء", "أشتري", "اشتري", "تملك", "شراء", "للبيع", "أبي أشتري"]
+BUY_SIGNALS_EN = ["buy", "purchase", "buying", "for sale", "own"]
+
+BUDGET_KEYWORDS = ["ألف", "الف", "k", "درهم", "دولار", "ريال", "AED", "aed", "000"]
+
+
+def _is_real_estate(text: str) -> bool:
+    t = text.lower()
+    return (
+        any(kw in t for kw in REAL_ESTATE_KEYWORDS_AR) or
+        any(kw in t for kw in REAL_ESTATE_KEYWORDS_EN)
+    )
+
+
+def _extract_rent_or_buy(text: str) -> Optional[str]:
+    t = text.lower()
+    if any(s in t for s in RENT_SIGNALS_AR + RENT_SIGNALS_EN):
+        return "rent"
+    if any(s in t for s in BUY_SIGNALS_AR + BUY_SIGNALS_EN):
+        return "buy"
+    return None
+
+
+def _has_budget(text: str) -> bool:
+    return any(kw in text.lower() for kw in BUDGET_KEYWORDS)
+
+
+def _handle_real_estate_flow(text: str, profile: dict) -> Optional[str]:
+    """
+    State machine for real estate qualification.
+    Returns a fixed reply if we're in the RE flow, or None to fall through to GPT.
+    """
+    # Check if this message OR history indicates real estate intent
+    re_intent = profile.get("re_intent", False) or _is_real_estate(text)
+
+    if not re_intent:
+        return None  # Not real estate — let GPT handle it
+
+    # Mark real estate intent in profile
+    profile["re_intent"] = True
+
+    # Check what we know so far
+    rent_or_buy = profile.get("re_type") or _extract_rent_or_buy(text)
+    has_budget = profile.get("re_budget") or _has_budget(text)
+
+    # Update profile with new info
+    if rent_or_buy:
+        profile["re_type"] = rent_or_buy
+    if _has_budget(text):
+        profile["re_budget"] = True
+
+    # State machine:
+    if not rent_or_buy:
+        return "إيجار أو شراء؟ 😊"
+
+    if not has_budget and not profile.get("re_budget"):
+        rent_label = "الإيجار" if rent_or_buy == "rent" else "الشراء"
+        return f"وكم ميزانيتك التقريبية لـ{rent_label}؟"
+
+    # Both known → send link
+    return (
+        f"تمام، عندي نظام ذكي يلاقيلك الخيار المناسب بالضبط 👌\n"
+        f"تفضل هنا وأكمل معه: {REAL_ESTATE_LINK}"
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Static responses for non-text messages
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -39,7 +126,6 @@ _RATE_LIMIT_REPLY = (
     "انتظر لحظة وحاول مرة ثانية."
 )
 
-# Max messages to keep in Redis per user
 _MAX_HISTORY = 30
 
 
@@ -47,11 +133,7 @@ _MAX_HISTORY = 30
 # Message type parser
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _parse_message(message: dict) -> tuple[Optional[str], str]:
-    """
-    Returns (text_for_gpt, special_action).
-    special_action: 'skip' | 'send_audio_reply' | 'send_image_reply' | 'continue'
-    """
+def _parse_message(message: dict) -> tuple:
     msg_type = message.get("type", "")
 
     if msg_type == "text":
@@ -79,22 +161,13 @@ def _parse_message(message: dict) -> tuple[Optional[str], str]:
         name = message.get("document", {}).get("filename", "ملف")
         return f"[ملف: {name}]", "continue"
 
-    elif msg_type == "sticker":
-        # Stickers: acknowledge briefly then ignore (don't consume GPT tokens)
-        return None, "skip"
-
-    elif msg_type == "reaction":
-        # Reactions to bot messages — no response needed
-        return None, "skip"
-
-    elif msg_type == "location":
+    elif msg_type in ("sticker", "reaction", "location"):
         return None, "skip"
 
     elif msg_type == "contacts":
         return "[شارك جهة اتصال]", "continue"
 
-    else:
-        return None, "skip"
+    return None, "skip"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -103,31 +176,23 @@ def _parse_message(message: dict) -> tuple[Optional[str], str]:
 
 @router.get("/webhook")
 async def verify_webhook(request: Request):
-    """Meta webhook verification challenge."""
     params = dict(request.query_params)
     if params.get("hub.verify_token") == settings.VERIFY_TOKEN:
         logger.info("Webhook verified ✅")
         return PlainTextResponse(content=params.get("hub.challenge", ""))
-    logger.warning("Webhook verification failed — wrong token")
     return JSONResponse(status_code=403, content={"error": "Invalid verify token"})
 
 
 @router.post("/webhook")
 async def handle_webhook(request: Request):
-    """Main webhook handler — processes all incoming WhatsApp events."""
-
-    # ── 1. Read body once (FastAPI caches it) ──────────────────────────────
     body_bytes = await request.body()
 
-    # ── 2. Verify Meta signature ────────────────────────────────────────────
     signature = request.headers.get("X-Hub-Signature-256", "")
     await verify_webhook_signature(body_bytes, signature)
 
-    # ── 3. Parse payload ────────────────────────────────────────────────────
     try:
         data = json.loads(body_bytes)
     except json.JSONDecodeError:
-        logger.error("Invalid JSON in webhook payload")
         return JSONResponse(content={"status": "ok"})
 
     try:
@@ -135,7 +200,6 @@ async def handle_webhook(request: Request):
         change = entry.get("changes", [{}])[0]
         value = change.get("value", {})
 
-        # Ignore status updates (read receipts, delivery reports)
         if "statuses" in value and "messages" not in value:
             return JSONResponse(content={"status": "ok"})
 
@@ -148,12 +212,12 @@ async def handle_webhook(request: Request):
         if not from_number:
             return JSONResponse(content={"status": "ok"})
 
-        # ── 4. Rate limiting ─────────────────────────────────────────────────
+        # Rate limiting
         if await is_rate_limited(from_number):
             await send_text_message(from_number, _RATE_LIMIT_REPLY)
             return JSONResponse(content={"status": "ok"})
 
-        # ── 5. Parse message type ────────────────────────────────────────────
+        # Parse message type
         text, action = _parse_message(message)
 
         if action == "skip":
@@ -167,38 +231,48 @@ async def handle_webhook(request: Request):
             await send_text_message(from_number, _IMAGE_NO_CAPTION_REPLY)
             return JSONResponse(content={"status": "ok"})
 
-        # action == "continue" — process with GPT
         if not text:
             return JSONResponse(content={"status": "ok"})
 
-        # ── 6. Load user context ─────────────────────────────────────────────
+        # Load context
         history = await get_conversation(from_number)
         user_profile = await get_user_profile(from_number)
 
-        # ── 7. Generate AI response ──────────────────────────────────────────
-        reply = await get_ai_response(from_number, text, history, user_profile)
+        # ━━━ Real Estate State Machine (Code Logic) ━━━
+        re_reply = _handle_real_estate_flow(text, user_profile)
 
-        # ── 8. Update conversation history ───────────────────────────────────
+        if re_reply:
+            reply = re_reply
+            logger.info(f"RE flow reply to {from_number}: step handled by code")
+        else:
+            # Fall through to GPT for non-RE messages
+            reply = await get_ai_response(from_number, text, history, user_profile)
+
+        # Update conversation history
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": reply})
 
-        # Keep only the most recent N messages (rolling window)
         if len(history) > _MAX_HISTORY:
             history = history[-_MAX_HISTORY:]
 
         await save_conversation(from_number, history)
 
-        # ── 9. Update user profile from this message ─────────────────────────
+        # Update user profile
         updated_profile = await update_profile_from_lead(from_number, text, user_profile)
+        # Preserve RE state flags
+        for key in ("re_intent", "re_type", "re_budget"):
+            if key in user_profile:
+                updated_profile[key] = user_profile[key]
+
         if updated_profile != user_profile:
             await save_user_profile(from_number, updated_profile)
 
-        # ── 10. Process lead classification ──────────────────────────────────
+        # Process lead classification
         lead, became_hot = await process_message_for_lead(
             from_number, text, history, updated_profile
         )
 
-        # ── 11. HOT lead: push to Sheets + notify admin ──────────────────────
+        # HOT lead: notify admin + push to Sheets
         if became_hot:
             logger.info(f"🔥 NEW HOT LEAD: {from_number}")
             await append_to_sheets(lead)
@@ -212,11 +286,10 @@ async def handle_webhook(request: Request):
             )
             await send_admin_notification(notification)
 
-        # ── 12. Send reply ───────────────────────────────────────────────────
+        # Send reply
         await send_text_message(from_number, reply)
 
     except Exception as e:
-        logger.error(f"Webhook processing error: {e}", exc_info=True)
+        logger.error(f"Webhook error: {e}", exc_info=True)
 
-    # Always return 200 — Meta retries on non-200
     return JSONResponse(content={"status": "ok"})
